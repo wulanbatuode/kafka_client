@@ -15,7 +15,7 @@ const (
 	TimeoutMs       = 1000
 	TimeoutSec      = 1
 	TimeBackoff     = time.Second
-	CommitInterval  = 1000
+	CommitInterval  = 100
 	RetryNum        = 5
 )
 
@@ -260,8 +260,8 @@ outer:
 	for {
 		err := c.newRawConsumer()
 		if err != nil {
-			newErrCnt--
-			if newErrCnt == 0 {
+			newErrCnt++
+			if newErrCnt == RetryNum {
 				os.Exit(-1)
 			}
 			continue outer
@@ -296,6 +296,9 @@ outer:
 						c.Consumer.Seek(msg.TopicPartition, TimeoutMs)
 					} else {
 						c.MessageChan <- msg
+					}
+					if pollErrCnt > 0 {
+						pollErrCnt = 0
 					}
 				case kafka.Error:
 					// Generic client instance-level errors, such as
@@ -334,6 +337,7 @@ func (c *KafkaConsumer) PollKafkaMessage(timeout time.Duration) *kafka.Message {
 		if msg != nil {
 			c.cache.Commit(*msg.TopicPartition.Topic,
 				int64(msg.TopicPartition.Partition), int64(msg.TopicPartition.Offset))
+			// if msg.TopicPartition.Offset%CommitInterval == 0 {
 		}
 		return msg
 	}
