@@ -3,6 +3,7 @@ package consumer
 const (
 	MaxPartitionNum = 10
 	OffsetBeginning = -2
+	OffsetEnd       = -1
 )
 
 type TopicInfo struct {
