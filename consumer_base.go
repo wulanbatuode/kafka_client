@@ -12,6 +12,7 @@ import (
 
 const (
 	MaxCacheMessage = 1000
+	MaxCtlSize      = 10
 	TimeoutMs       = 1000
 	TimeoutSec      = 1
 	TimeBackoff     = time.Second
@@ -74,7 +75,7 @@ func NewConsumer(config *Config, topics []string) (*KafkaConsumer, error) {
 	consumer.cache = NewCache(topics)
 	consumer.config = config
 	consumer.wg = sync.WaitGroup{}
-	consumer.ctrlChan = make(chan int)
+	consumer.ctrlChan = make(chan int, MaxCtlSize)
 	consumer.backChan = make(chan error)
 	consumer.MessageChan = nil
 	consumer.Consumer = nil
@@ -135,19 +136,21 @@ func (c *KafkaConsumer) Disconnect() {
 
 func (c *KafkaConsumer) Close() {
 	c.Disconnect()
+	c.closeControlChannel()
+}
+func (c *KafkaConsumer) newMessageChannel() {
+	c.MessageChan = make(chan *kafka.Message, MaxCacheMessage)
+}
+func (c *KafkaConsumer) closeMessageChannel() {
+	close(c.MessageChan)
+	c.MessageChan = nil
+}
+func (c *KafkaConsumer) closeControlChannel() {
 	close(c.ctrlChan)
 	c.ctrlChan = nil
 	close(c.backChan)
 	c.backChan = nil
 }
-func (c *KafkaConsumer) newChannel() {
-	c.MessageChan = make(chan *kafka.Message, MaxCacheMessage)
-}
-func (c *KafkaConsumer) closeChannel() {
-	close(c.MessageChan)
-	c.MessageChan = nil
-}
-
 func (c *KafkaConsumer) rawConsumerClose() {
 	c.Consumer.Unsubscribe()
 	err := c.Consumer.Unassign()
@@ -160,7 +163,7 @@ func (c *KafkaConsumer) rawConsumerClose() {
 
 func (c *KafkaConsumer) stop() {
 	c.rawConsumerClose()
-	c.closeChannel()
+	c.closeMessageChannel()
 }
 
 func (c *KafkaConsumer) seekCacheToHighWater() error {
@@ -186,7 +189,7 @@ func (c *KafkaConsumer) seekCacheToHighWater() error {
 	}
 	return nil
 }
-func (c *KafkaConsumer) seekConsumerByCache() error {
+func (c *KafkaConsumer) seekConsumerToCache() error {
 	assignedTopics := c.cache.GetAssigned()
 	for _, tpInfo := range assignedTopics {
 		for part, assigned := range tpInfo.Assigned {
@@ -217,37 +220,31 @@ func (c *KafkaConsumer) SeekEnd() error {
 	}
 }
 func (c *KafkaConsumer) triggerAssignment() {
-	for {
-		evt := c.Consumer.Poll(TimeoutMs)
-		if evt == nil {
-			log.Printf("first poll evt %v.", evt)
-			time.Sleep(TimeBackoff)
-			break
-		}
-		switch msg := evt.(type) {
-		case *kafka.Message:
-			c.Consumer.Seek(msg.TopicPartition, TimeoutMs)
-		default:
-			log.Printf("polled %v on first poll, ignore", evt)
-		}
-		break
+	evt := c.Consumer.Poll(TimeoutMs)
+	if evt == nil {
+		log.Printf("first poll evt %v.", evt)
+		return
+	}
+	switch msg := evt.(type) {
+	case *kafka.Message:
+		c.Consumer.Seek(msg.TopicPartition, TimeoutMs)
+	default:
+		log.Printf("polled %v on first poll, ignore", evt)
 	}
 }
 func (c *KafkaConsumer) seekEndOperation() error {
-	log.Println("seekendOp")
 	c.triggerAssignment()
-	log.Println("seekend start")
 	var err error = nil
 	for i := 0; i < RetryNum; i++ {
 		if err = c.seekCacheToHighWater(); err != nil {
 			continue
 		}
-		if err = c.seekConsumerByCache(); err != nil {
+		if err = c.seekConsumerToCache(); err != nil {
 			continue
 		}
 		err = nil
-		c.closeChannel()
-		c.newChannel()
+		c.closeMessageChannel()
+		c.newMessageChannel()
 		break
 	}
 	return err
@@ -260,25 +257,28 @@ outer:
 	for {
 		err := c.newRawConsumer()
 		if err != nil {
+			log.Printf("err %v in new raw consumer(%v/%v), retry.\n", err, newErrCnt, RetryNum)
 			newErrCnt++
 			if newErrCnt == RetryNum {
+				c.closeControlChannel()
 				os.Exit(-1)
 			}
 			continue outer
 		}
 		newErrCnt = 0
 
-		c.newChannel()
+		c.newMessageChannel()
 		c.subscribe(c.topics)
 		c.triggerAssignment()
-		c.seekConsumerByCache()
+		c.seekConsumerToCache()
 		for {
 			select {
 			case ctl := <-c.ctrlChan:
 				if ctl == CtrlStop {
+					log.Println("stop raw consumer sig.")
 					break outer
 				} else if ctl == CtrlSeekEnd {
-					log.Println("seek end")
+					log.Println("seek end sig.")
 					c.backChan <- c.seekEndOperation()
 				} else {
 					log.Printf("unknown ctrl %v, ignore", ctl)
@@ -297,9 +297,7 @@ outer:
 					} else {
 						c.MessageChan <- msg
 					}
-					if pollErrCnt > 0 {
-						pollErrCnt = 0
-					}
+					pollErrCnt = 0
 				case kafka.Error:
 					// Generic client instance-level errors, such as
 					// broker connection failures, authentication issues, etc.
@@ -308,17 +306,23 @@ outer:
 					// as the underlying client will automatically try to
 					// recover from any errors encountered, the application
 					// does not need to take action on them.
-
-					// TODO:
 					log.Printf("polled err %v.", msg)
-					c.stop()
 					pollErrCnt++
+
 					if pollErrCnt == RetryNum {
+						c.stop()
+						c.closeControlChannel()
+						log.Printf("err %v in poll(%v/%v), exit.\n", err, newErrCnt, RetryNum)
+
 						os.Exit(1)
+					} else if pollErrCnt < RetryNum {
+						// if error count < RetryNum, wait for low
+						log.Printf("err %v in poll(%v/%v), retry.\n", err, newErrCnt, RetryNum)
+						continue
 					}
 					continue outer
 				default:
-					log.Printf("unknown type, %v\n", msg)
+					log.Printf("unknown type, ignore. %v\n", msg)
 				}
 			}
 			// TODO: commit cached offset to broker by interval
@@ -337,7 +341,11 @@ func (c *KafkaConsumer) PollKafkaMessage(timeout time.Duration) *kafka.Message {
 		if msg != nil {
 			c.cache.Commit(*msg.TopicPartition.Topic,
 				int64(msg.TopicPartition.Partition), int64(msg.TopicPartition.Offset))
+			// TODO: COMMIT MSG
 			// if msg.TopicPartition.Offset%CommitInterval == 0 {
+			// 	<
+			// }
+
 		}
 		return msg
 	}
