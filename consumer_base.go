@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -19,6 +20,23 @@ const (
 	RetryNum        = 5
 )
 
+type CtrlType int
+
+const (
+	CtrlStop CtrlType = iota
+	CtrlSeekEnd
+	CtrlCommit
+)
+
+var ctrlTypeName = [3]string{"CtrlStop", "CtrlSeekEnd", "CtrlCommit"}
+
+func (i CtrlType) String() string {
+	if i < 0 || int(i) >= len(ctrlTypeName) {
+		return "CtrlType(" + strconv.FormatInt(int64(i), 10) + ")"
+	}
+	return ctrlTypeName[int(i)]
+}
+
 var (
 	ErrParam   = errors.New("err param")
 	ErrTimeout = errors.New("err timeout")
@@ -30,10 +48,6 @@ var (
 		{Key: "auto.offset.reset", Val: "earliest"},
 		{Key: "broker.address.family", Val: "v4"},
 	}
-
-	CtrlStop    = 1
-	CtrlSeekEnd = 2
-	CtrlCommit  = 3
 )
 
 type (
@@ -48,7 +62,7 @@ type KafkaConsumer struct {
 	MessageChan         chan *kafka.Message
 	MessageToCommitChan chan *kafka.Message
 	cache               *Cache
-	ctrlChan            chan int
+	ctrlChan            chan CtrlType
 	backChan            chan error
 	wg                  sync.WaitGroup
 }
@@ -76,7 +90,7 @@ func NewConsumer(config *Config, topics []string) (*KafkaConsumer, error) {
 	consumer.cache = NewCache(topics)
 	consumer.config = config
 	consumer.wg = sync.WaitGroup{}
-	consumer.ctrlChan = make(chan int, MaxCtlSize)
+	consumer.ctrlChan = make(chan CtrlType, MaxCtlSize)
 	consumer.backChan = make(chan error)
 	consumer.MessageChan = nil
 	consumer.Consumer = nil
