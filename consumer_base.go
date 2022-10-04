@@ -367,11 +367,13 @@ func (c *KafkaConsumer) commitMessageWithTimeout(msg *kafka.Message, timeout tim
 		tpInfo, err := c.Consumer.CommitMessage(msg)
 		log.Printf("commited %v, ignore err if any. err: %v", tpInfo, err)
 		ch <- struct{}{}
+		close(ch)
 	}()
 	select {
 	case <-time.After(timeout):
 		log.Println("commit timeout")
 	case <-ch:
+		close(ch)
 		log.Println("commit done")
 	}
 }
