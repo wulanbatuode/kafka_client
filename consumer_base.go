@@ -16,7 +16,6 @@ const (
 	MaxCtlSize      = 10
 	TimeoutMs       = 1000
 	TimeoutSec      = 1
-	CommitInterval  = 100
 	RetryNum        = 5
 )
 
@@ -25,10 +24,9 @@ type CtrlType int
 const (
 	CtrlStop CtrlType = iota
 	CtrlSeekEnd
-	CtrlCommit
 )
 
-var ctrlTypeName = [3]string{"CtrlStop", "CtrlSeekEnd", "CtrlCommit"}
+var ctrlTypeName = [2]string{"CtrlStop", "CtrlSeekEnd"}
 
 func (i CtrlType) String() string {
 	if i < 0 || int(i) >= len(ctrlTypeName) {
@@ -60,11 +58,10 @@ type KafkaConsumer struct {
 	Consumer    *kafka.Consumer
 	topics      []string
 	MessageChan chan *kafka.Message
-	// MessageToCommitChan chan *kafka.Message
-	cache    *Cache
-	ctrlChan chan CtrlType
-	backChan chan error
-	wg       sync.WaitGroup
+	cache       *Cache
+	ctrlChan    chan CtrlType
+	backChan    chan error
+	wg          sync.WaitGroup
 }
 
 func preflight(config Config) error {
@@ -87,7 +84,7 @@ func NewConsumer(config *Config, topics []string) (*KafkaConsumer, error) {
 		return nil, err
 	}
 	consumer.topics = topics
-	consumer.cache = NewCache(topics)
+	consumer.cache = newCache(topics)
 	consumer.config = config
 	consumer.wg = sync.WaitGroup{}
 	consumer.ctrlChan = make(chan CtrlType, MaxCtlSize)
@@ -126,12 +123,12 @@ func (c *KafkaConsumer) relalanceCallback(rawConsumer *kafka.Consumer,
 
 func (c *KafkaConsumer) assign(parts []kafka.TopicPartition) {
 	for _, part := range parts {
-		c.cache.AssignPartition(string(*part.Topic), int64(part.Partition), int64(part.Offset))
+		c.cache.assignPartition(string(*part.Topic), int64(part.Partition), int64(part.Offset))
 	}
 }
 func (c *KafkaConsumer) revoke(parts []kafka.TopicPartition) {
 	for _, part := range parts {
-		c.cache.RevokePartition(string(*part.Topic), int64(part.Partition))
+		c.cache.revokePartition(string(*part.Topic), int64(part.Partition))
 	}
 }
 
@@ -140,28 +137,25 @@ func (c *KafkaConsumer) subscribe(topics []string) error {
 	return err
 }
 
-func (c *KafkaConsumer) Connect() {
+func (c *KafkaConsumer) connect() {
 	c.wg.Add(1)
 	go c.run()
 }
-func (c *KafkaConsumer) Disconnect() {
+func (c *KafkaConsumer) disconnect() {
 	c.ctrlChan <- CtrlStop
 	c.wg.Wait()
 }
 
-func (c *KafkaConsumer) Close() {
-	c.Disconnect()
+func (c *KafkaConsumer) close() {
+	c.disconnect()
 	c.closeControlChannel()
 }
 func (c *KafkaConsumer) newMessageChannel() {
 	c.MessageChan = make(chan *kafka.Message, MaxCacheMessage)
-	// c.MessageToCommitChan = make(chan *kafka.Message, MaxCtlSize)
 }
 func (c *KafkaConsumer) closeMessageChannel() {
 	close(c.MessageChan)
 	c.MessageChan = nil
-	// close(c.MessageToCommitChan)
-	// c.MessageToCommitChan = nil
 }
 func (c *KafkaConsumer) closeControlChannel() {
 	close(c.ctrlChan)
@@ -186,7 +180,7 @@ func (c *KafkaConsumer) stop() {
 
 func (c *KafkaConsumer) seekCacheToHighWater() error {
 	c.triggerAssignment()
-	assignedTopics := c.cache.GetAssigned()
+	assignedTopics := c.cache.getAssigned()
 	for _, tpInfo := range assignedTopics {
 		for part, assigned := range tpInfo.Assigned {
 			if assigned {
@@ -201,14 +195,14 @@ func (c *KafkaConsumer) seekCacheToHighWater() error {
 					log.Printf("get invalid high watermark on %v@[%v]", tpInfo.Topic, part)
 					high = int64(OffsetEnd)
 				}
-				c.cache.Commit(tpInfo.Topic, int64(part), high)
+				c.cache.commit(tpInfo.Topic, int64(part), high)
 			}
 		}
 	}
 	return nil
 }
 func (c *KafkaConsumer) seekConsumerToCache() error {
-	assignedTopics := c.cache.GetAssigned()
+	assignedTopics := c.cache.getAssigned()
 	for _, tpInfo := range assignedTopics {
 		for part, assigned := range tpInfo.Assigned {
 			if assigned && tpInfo.Offset[part] >= 0 {
@@ -228,7 +222,7 @@ func (c *KafkaConsumer) seekConsumerToCache() error {
 	return nil
 }
 
-func (c *KafkaConsumer) SeekEnd() error {
+func (c *KafkaConsumer) seekEnd() error {
 	c.ctrlChan <- CtrlSeekEnd
 	select {
 	case <-time.After(TimeoutSec * time.Second):
@@ -298,12 +292,6 @@ outer:
 				} else if ctl == CtrlSeekEnd {
 					log.Println("seek end sig.")
 					c.backChan <- c.seekEndOperation()
-				} else if ctl == CtrlCommit {
-					// if len(c.MessageToCommitChan) > 0 {
-					// 	msgToCommit := <-c.MessageToCommitChan
-					// 	// c.commitMessageWithTimeout(msgToCommit, TimeoutSec*time.Second)
-					// 	log.Printf("commiting msg %v", msgToCommit)
-					// }
 				} else {
 					log.Printf("unknown ctrl %v, ignore", ctl)
 				}
@@ -323,13 +311,6 @@ outer:
 					}
 					pollErrCnt = 0
 				case kafka.Error:
-					// Generic client instance-level errors, such as
-					// broker connection failures, authentication issues, etc.
-					//
-					// These errors should generally be considered informational
-					// as the underlying client will automatically try to
-					// recover from any errors encountered, the application
-					// does not need to take action on them.
 					log.Printf("polled err %v.", msg)
 					pollErrCnt++
 
@@ -340,7 +321,6 @@ outer:
 
 						os.Exit(1)
 					} else if pollErrCnt < RetryNum {
-						// if error count < RetryNum, wait for low
 						log.Printf("err %v in poll(%v/%v), retry.\n", err, newErrCnt, RetryNum)
 						continue
 					}
@@ -349,7 +329,6 @@ outer:
 					log.Printf("unknown type, ignore. %v\n", msg)
 				}
 			}
-			// TODO: commit cached offset to broker by interval
 		}
 	}
 	c.stop()
@@ -363,36 +342,14 @@ func (c *KafkaConsumer) PollKafkaMessage(timeout time.Duration) *kafka.Message {
 		return nil
 	case msg := <-c.MessageChan:
 		if msg != nil {
-			c.cache.Commit(*msg.TopicPartition.Topic,
+			c.cache.commit(*msg.TopicPartition.Topic,
 				int64(msg.TopicPartition.Partition), int64(msg.TopicPartition.Offset))
-			// TODO: COMMIT MSG
-			// if msg.TopicPartition.Offset%CommitInterval == 0 {
-			// 	c.ctrlChan <- CtrlCommit
-			// 	c.MessageToCommitChan <- msg
-			// }
-
 		}
 		return msg
 	}
 }
 
-// func (c *KafkaConsumer) commitMessageWithTimeout(msg *kafka.Message, timeout time.Duration) {
-// 	ch := make(chan struct{})
-// 	go func() {
-// 		tpInfo, err := c.Consumer.CommitMessage(msg)
-// 		log.Printf("commited %v, ignore err if any. err: %v", tpInfo, err)
-// 		ch <- struct{}{}
-// 	}()
-// 	select {
-// 	case <-time.After(timeout):
-// 		log.Println("commit timeout")
-// 	case <-ch:
-// 		close(ch)
-// 		log.Println("commit done")
-// 	}
-// }
-
 func (c *KafkaConsumer) GetAssignedNumFromBroker() int {
 	c.triggerAssignment()
-	return c.cache.AssignedInfoNum
+	return len(c.cache.getAssigned())
 }

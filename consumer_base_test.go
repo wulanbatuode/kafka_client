@@ -75,7 +75,7 @@ func produceMessage(t *testing.T, bootstrapServers, topic string, msgTag, totalM
 					t.Logf("Delivery failed: %v\n", m.TopicPartition.Error)
 				} else {
 					t.Logf("Delivered message %v to topic %s [%d] at offset %v\n",
-						m.Value, *m.TopicPartition.Topic,
+						string(m.Value), *m.TopicPartition.Topic,
 						m.TopicPartition.Partition, m.TopicPartition.Offset)
 				}
 			case kafka.Error:
@@ -139,6 +139,11 @@ func testPollHelper(t *testing.T, consumer *KafkaConsumer, nNil int) int {
 	return msgCnt
 }
 
+func TestCtrlEnum(t *testing.T) {
+	assert.Equal(t, "CtrlSeekEnd", CtrlSeekEnd.String())
+	assert.Equal(t, "CtrlType(19)", CtrlType(19).String())
+}
+
 func TestPreflight(t *testing.T) {
 
 	config := Config{
@@ -187,7 +192,7 @@ func TestPoll(t *testing.T) {
 
 	})
 	t.Run("conect", func(t *testing.T) {
-		consumer.Connect()
+		consumer.connect()
 		time.Sleep(time.Second)
 		assertor.NotEqual((*kafka.Consumer)(nil), consumer.Consumer)
 		assertor.NotEqual((chan *kafka.Message)(nil), consumer.MessageChan)
@@ -195,8 +200,8 @@ func TestPoll(t *testing.T) {
 
 	})
 	t.Run("get assign", func(t *testing.T) {
-		assignedNum := consumer.GetAssignedNumFromBroker()
-		assertor.Equal(numParts, assignedNum)
+		// assignedNum := consumer.GetAssignedNumFromBroker()
+		// assertor.Equal(numParts, assignedNum)
 	})
 	t.Run("poll", func(t *testing.T) {
 		produceMessage(t, server, topic, 0, nMsg)
@@ -204,7 +209,7 @@ func TestPoll(t *testing.T) {
 		assertor.Equal(nMsg, msgCnt)
 	})
 	t.Run("disconnect", func(t *testing.T) {
-		consumer.Disconnect()
+		consumer.disconnect()
 		assertor.Equal((*kafka.Consumer)(nil), consumer.Consumer)
 		assertor.Equal((chan *kafka.Message)(nil), consumer.MessageChan)
 		assertor.NotEqual((chan int)(nil), consumer.ctrlChan)
@@ -214,7 +219,7 @@ func TestPoll(t *testing.T) {
 	})
 
 	t.Run("connect", func(t *testing.T) {
-		consumer.Connect()
+		consumer.connect()
 		time.Sleep(time.Second)
 		assertor.NotEqual((*kafka.Consumer)(nil), consumer.Consumer)
 		assertor.NotEqual((chan *kafka.Message)(nil), consumer.MessageChan)
@@ -225,17 +230,17 @@ func TestPoll(t *testing.T) {
 	})
 
 	t.Run("seekend", func(t *testing.T) {
-		consumer.Disconnect()
+		consumer.disconnect()
 		produceMessage(t, server, topic, 300, nMsg)
-		consumer.Connect()
-		assertor.Equal(nil, consumer.SeekEnd())
+		consumer.connect()
+		assertor.Equal(nil, consumer.seekEnd())
 		produceMessage(t, server, topic, 500, nMsg/2)
 		msgCnt := testPollHelper(t, consumer, nNil)
 		assertor.Equal(nMsg/2, msgCnt)
 	})
 	closed := false
 	t.Run("close", func(t *testing.T) {
-		consumer.Close()
+		consumer.close()
 		assertor.Equal((*kafka.Consumer)(nil), consumer.Consumer)
 		assertor.Equal((chan *kafka.Message)(nil), consumer.MessageChan)
 		assertor.Equal((chan CtrlType)(nil), consumer.ctrlChan)
@@ -243,7 +248,7 @@ func TestPoll(t *testing.T) {
 	})
 	t.Cleanup(func() {
 		if !closed {
-			consumer.Close()
+			consumer.close()
 		}
 	})
 }
