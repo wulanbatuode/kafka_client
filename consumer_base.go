@@ -56,15 +56,15 @@ type (
 )
 
 type KafkaConsumer struct {
-	config              *Config
-	Consumer            *kafka.Consumer
-	topics              []string
-	MessageChan         chan *kafka.Message
-	MessageToCommitChan chan *kafka.Message
-	cache               *Cache
-	ctrlChan            chan CtrlType
-	backChan            chan error
-	wg                  sync.WaitGroup
+	config      *Config
+	Consumer    *kafka.Consumer
+	topics      []string
+	MessageChan chan *kafka.Message
+	// MessageToCommitChan chan *kafka.Message
+	cache    *Cache
+	ctrlChan chan CtrlType
+	backChan chan error
+	wg       sync.WaitGroup
 }
 
 func preflight(config Config) error {
@@ -155,13 +155,13 @@ func (c *KafkaConsumer) Close() {
 }
 func (c *KafkaConsumer) newMessageChannel() {
 	c.MessageChan = make(chan *kafka.Message, MaxCacheMessage)
-	c.MessageToCommitChan = make(chan *kafka.Message, MaxCtlSize)
+	// c.MessageToCommitChan = make(chan *kafka.Message, MaxCtlSize)
 }
 func (c *KafkaConsumer) closeMessageChannel() {
 	close(c.MessageChan)
 	c.MessageChan = nil
-	close(c.MessageToCommitChan)
-	c.MessageToCommitChan = nil
+	// close(c.MessageToCommitChan)
+	// c.MessageToCommitChan = nil
 }
 func (c *KafkaConsumer) closeControlChannel() {
 	close(c.ctrlChan)
@@ -240,7 +240,7 @@ func (c *KafkaConsumer) SeekEnd() error {
 func (c *KafkaConsumer) triggerAssignment() {
 	evt := c.Consumer.Poll(TimeoutMs)
 	if evt == nil {
-		log.Printf("first poll evt %v.", evt)
+		log.Printf("trigger assignment poll evt %v.", evt)
 		return
 	}
 	switch msg := evt.(type) {
@@ -299,10 +299,11 @@ outer:
 					log.Println("seek end sig.")
 					c.backChan <- c.seekEndOperation()
 				} else if ctl == CtrlCommit {
-					if len(c.MessageToCommitChan) > 0 {
-						msgToCommit := <-c.MessageToCommitChan
-						c.commitMessageWithTimeout(msgToCommit, TimeoutSec*time.Second)
-					}
+					// if len(c.MessageToCommitChan) > 0 {
+					// 	msgToCommit := <-c.MessageToCommitChan
+					// 	// c.commitMessageWithTimeout(msgToCommit, TimeoutSec*time.Second)
+					// 	log.Printf("commiting msg %v", msgToCommit)
+					// }
 				} else {
 					log.Printf("unknown ctrl %v, ignore", ctl)
 				}
@@ -365,32 +366,31 @@ func (c *KafkaConsumer) PollKafkaMessage(timeout time.Duration) *kafka.Message {
 			c.cache.Commit(*msg.TopicPartition.Topic,
 				int64(msg.TopicPartition.Partition), int64(msg.TopicPartition.Offset))
 			// TODO: COMMIT MSG
-			if msg.TopicPartition.Offset%CommitInterval == 0 {
-				c.ctrlChan <- CtrlCommit
-				c.MessageToCommitChan <- msg
-			}
+			// if msg.TopicPartition.Offset%CommitInterval == 0 {
+			// 	c.ctrlChan <- CtrlCommit
+			// 	c.MessageToCommitChan <- msg
+			// }
 
 		}
 		return msg
 	}
 }
 
-func (c *KafkaConsumer) commitMessageWithTimeout(msg *kafka.Message, timeout time.Duration) {
-	ch := make(chan struct{})
-	go func() {
-		tpInfo, err := c.Consumer.CommitMessage(msg)
-		log.Printf("commited %v, ignore err if any. err: %v", tpInfo, err)
-		ch <- struct{}{}
-		close(ch)
-	}()
-	select {
-	case <-time.After(timeout):
-		log.Println("commit timeout")
-	case <-ch:
-		close(ch)
-		log.Println("commit done")
-	}
-}
+// func (c *KafkaConsumer) commitMessageWithTimeout(msg *kafka.Message, timeout time.Duration) {
+// 	ch := make(chan struct{})
+// 	go func() {
+// 		tpInfo, err := c.Consumer.CommitMessage(msg)
+// 		log.Printf("commited %v, ignore err if any. err: %v", tpInfo, err)
+// 		ch <- struct{}{}
+// 	}()
+// 	select {
+// 	case <-time.After(timeout):
+// 		log.Println("commit timeout")
+// 	case <-ch:
+// 		close(ch)
+// 		log.Println("commit done")
+// 	}
+// }
 
 func (c *KafkaConsumer) GetAssignedNumFromBroker() int {
 	c.triggerAssignment()

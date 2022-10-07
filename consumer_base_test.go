@@ -74,8 +74,9 @@ func produceMessage(t *testing.T, bootstrapServers, topic string, msgTag, totalM
 				if m.TopicPartition.Error != nil {
 					t.Logf("Delivery failed: %v\n", m.TopicPartition.Error)
 				} else {
-					t.Logf("Delivered message to topic %s [%d] at offset %v\n",
-						*m.TopicPartition.Topic, m.TopicPartition.Partition, m.TopicPartition.Offset)
+					t.Logf("Delivered message %v to topic %s [%d] at offset %v\n",
+						m.Value, *m.TopicPartition.Topic,
+						m.TopicPartition.Partition, m.TopicPartition.Offset)
 				}
 			case kafka.Error:
 				t.Logf("Error: %v\n", ev)
@@ -228,7 +229,7 @@ func TestPoll(t *testing.T) {
 		produceMessage(t, server, topic, 300, nMsg)
 		consumer.Connect()
 		assertor.Equal(nil, consumer.SeekEnd())
-		produceMessage(t, server, topic, 400, nMsg/2)
+		produceMessage(t, server, topic, 500, nMsg/2)
 		msgCnt := testPollHelper(t, consumer, nNil)
 		assertor.Equal(nMsg/2, msgCnt)
 	})
@@ -237,7 +238,7 @@ func TestPoll(t *testing.T) {
 		consumer.Close()
 		assertor.Equal((*kafka.Consumer)(nil), consumer.Consumer)
 		assertor.Equal((chan *kafka.Message)(nil), consumer.MessageChan)
-		assertor.Equal((chan int)(nil), consumer.ctrlChan)
+		assertor.Equal((chan CtrlType)(nil), consumer.ctrlChan)
 		closed = true
 	})
 	t.Cleanup(func() {
